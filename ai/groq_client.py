@@ -22,7 +22,7 @@ def create_client(settings: Settings) -> groq.Groq:
         raise ConfigurationError(
             "GROQ_MODEL is not set. Add the exact Groq model identifier to your .env file."
         )
-    return groq.Groq(api_key=settings.groq_api_key, timeout=60.0, max_retries=2)
+    return groq.Groq(api_key=settings.groq_api_key, timeout=60.0, max_retries=0)
 
 
 def complete_json(client: groq.Groq, settings: Settings, messages: list[dict]) -> str:
@@ -31,7 +31,7 @@ def complete_json(client: groq.Groq, settings: Settings, messages: list[dict]) -
         "messages": messages,
         "response_format": {"type": "json_object"},
         "temperature": settings.groq_temperature,
-        "max_completion_tokens": 4096,
+        "max_completion_tokens": 1024,
     }, kind="json")
     # Some models wrap JSON in a markdown code fence despite JSON mode.
     fenced = _CODE_FENCE.match(text)
@@ -43,7 +43,7 @@ def complete_text(client: groq.Groq, settings: Settings, messages: list[dict]) -
     return _complete(client, settings, {
         "messages": messages,
         "temperature": settings.groq_reply_temperature,
-        "max_completion_tokens": 2048,
+        "max_completion_tokens": 512,
     }, kind="text")
 
 
@@ -82,7 +82,26 @@ def _request(client: groq.Groq, params: dict, settings: Settings):
             f"Model '{settings.groq_model}' was not found on Groq (404). Check GROQ_MODEL in .env."
         ) from exc
     except groq.RateLimitError as exc:
-        raise LLMRequestError("Groq rate limit reached (429). Wait a moment and retry.") from exc
+        headers = exc.response.headers if exc.response else {}
+        rate_info = {
+            key: headers.get(key)
+            for key in [
+                "retry-after",
+                "x-ratelimit-limit-requests",
+                "x-ratelimit-remaining-requests",
+                "x-ratelimit-reset-requests",
+                "x-ratelimit-limit-tokens",
+                "x-ratelimit-remaining-tokens",
+                "x-ratelimit-reset-tokens",
+                ]
+                }
+
+        log.warning("Groq 429 details: %s | Rate limits: %s",
+                _error_detail(exc), rate_info)
+        raise LLMRequestError(
+            f"Groq rate limit reached (429). Retry after: "
+            f"{headers.get('retry-after', 'check rate-limit reset')}"
+            ) from exc
     except groq.APITimeoutError as exc:
         raise LLMRequestError("The Groq request timed out. Check your connection and retry.") from exc
     except groq.APIConnectionError as exc:
