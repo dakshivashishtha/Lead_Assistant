@@ -9,7 +9,7 @@ client = Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"
 try:
     m = client.messages.create(
         from_=os.environ["TWILIO_WHATSAPP_FROM"],
-        to="whatsapp:+918595856142",
+        to=f"whatsapp:{os.environ['WHATSAPP_TO_NUMBER']}",
         body="custom test message",
     )
     print("Queued:", m.sid, m.status)
