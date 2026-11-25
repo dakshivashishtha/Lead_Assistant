@@ -50,7 +50,6 @@ def handle_whatsapp_turn(sender_id: str, text: str) -> None:
         settings = get_settings()
 
         with connect(settings.database_path) as conn:
-            # 1. Reuse an existing open conversation for this sender, or start a new one
             existing_convs = repo.list_conversations(conn, None)
             conv_id = next(
                 (c["id"] for c in existing_convs if c.get("sender_phone") == sender_id),
@@ -63,14 +62,64 @@ def handle_whatsapp_turn(sender_id: str, text: str) -> None:
                     default_country_code=settings.default_country_code,
                 )
 
-            # 2. Save the customer's incoming message
             lead_service.record_customer_message(conn, conv_id, text)
-
-            # 3. Run Groq extraction + deterministic scoring + reply generation
             result = conversation_service.process_turn(conn, conv_id, settings, generate=True)
 
-            # 4. Read the generated assistant reply from the database
             messages = repo.get_messages(conn, conv_id)
             assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
             if result.ok and assistant_msgs:
                 reply_text = assistant_msgs[-1]["content"]
+            else:
+                reply_text = "Thank you for reaching out! Our team has noted your inquiry and will get back to you shortly."
+
+        send_whatsapp_reply(sender_id, reply_text)
+    except Exception as exc:
+        log.exception("Failed processing WhatsApp turn for %s: %s", sender_id, exc)
+
+
+@app.get("/")
+async def health():
+    return {"status": "ok", "service": "WhatsApp Lead Assistant"}
+
+
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    """Meta webhook verification handshake."""
+    load_dotenv(override=True)
+    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", "leadbot_secret_2026").strip()
+
+    params = request.query_params
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == verify_token:
+        return int(params.get("hub.challenge"))
+    raise HTTPException(status_code=403, detail="Invalid verify token")
+
+
+@app.post("/webhook")
+async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
+    """Receives incoming WhatsApp messages and status updates from Meta."""
+    raw_body = await request.body()
+    if not raw_body:
+        return {"status": "ok"}
+
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        log.warning("Non-JSON payload received: %s", raw_body)
+        return {"status": "ok"}
+
+    log.info("INCOMING WHATSAPP PAYLOAD: %s", json.dumps(body))
+
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            contacts = value.get("contacts", [])
+            wa_id = contacts[0].get("wa_id", "") if contacts else ""
+
+            for msg in value.get("messages", []):
+                if msg.get("type") == "text":
+                    sender_id = wa_id or msg.get("from", "")
+                    text = msg.get("text", {}).get("body", "").strip()
+                    if sender_id and text:
+                        background_tasks.add_task(handle_whatsapp_turn, sender_id, text)
+
+    return {"status": "ok"}
