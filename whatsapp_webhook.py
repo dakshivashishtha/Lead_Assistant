@@ -1,3 +1,4 @@
+import json
 import os
 import requests
 from dotenv import load_dotenv
@@ -37,6 +38,8 @@ def send_whatsapp_reply(to_phone: str, text: str) -> None:
     resp = requests.post(url, headers=headers, json=payload, timeout=15)
     if not resp.ok:
         log.error("WhatsApp API error (%s): %s", resp.status_code, resp.text)
+    else:
+        log.info("WhatsApp reply sent successfully to %s", to_phone)
 
 
 def handle_whatsapp_turn(sender_phone: str, text: str) -> None:
@@ -94,16 +97,27 @@ async def verify_webhook(request: Request):
 
 @app.post("/webhook")
 async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
-    """Receives incoming WhatsApp messages and processes them in the background."""
-    body = await request.json()
+    """Receives incoming WhatsApp messages and status updates from Meta."""
+    raw_body = await request.body()
+    if not raw_body:
+        return {"status": "ok"}
+
     try:
-        value = body["entry"][0]["changes"][0]["value"]
-        if "messages" in value:
-            msg = value["messages"][0]
-            if msg.get("type") == "text":
-                sender_phone = msg["from"]
-                text = msg["text"]["body"]
-                background_tasks.add_task(handle_whatsapp_turn, sender_phone, text)
-    except (KeyError, IndexError):
-        pass
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        log.warning("Non-JSON payload received: %s", raw_body)
+        return {"status": "ok"}
+
+    log.info("INCOMING WHATSAPP PAYLOAD: %s", json.dumps(body))
+
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for msg in value.get("messages", []):
+                if msg.get("type") == "text":
+                    sender_phone = msg.get("from", "")
+                    text = msg.get("text", {}).get("body", "").strip()
+                    if sender_phone and text:
+                        background_tasks.add_task(handle_whatsapp_turn, sender_phone, text)
+
     return {"status": "ok"}
